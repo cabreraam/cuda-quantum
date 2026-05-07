@@ -660,6 +660,48 @@ def GetConcreteMatrix : Pass<"get-concrete-matrix", "mlir::ModuleOp"> {
   }];
 }
 
+def GroupClassicalAndQuantumOps : Pass<"group-classical-and-quantum-ops", "mlir::func::FuncOp"> {
+  let summary = "Reorder ops to pull classical work next to quantum work.";
+  let description = [{
+    Within each block, build a dependence DAG from SSA use-def edges and from
+    memory effects (`MemoryEffectOpInterface` / `getEffectsRecursively`): two
+    reads of the same `mlir::Value` may reorder; unknown-effect ops are pinned
+    relative to all other ops in that block. No barrier operations are inserted.
+
+    A topological order is chosen with a **classical-first** tie-break: if any
+    ready op is not in the Quake dialect (``isQuakeOperation``), schedule the
+    one with the smallest original index; otherwise schedule the smallest-index
+    ready Quake op. That tends to form **macro regions** then a contiguous 
+    quantum section, then classical that consumes measurement results (and 
+    further classical prep for a later quantum round when dependences unlock it), 
+    and so on. Dependences still force ordering where values cross the 
+    classical/quantum boundary.
+
+    Example:
+    ```mlir
+    func.func @kernel() -> i32 {
+      %w = quake.null_wire
+      %w1 = quake.x %w : (!quake.wire) -> !quake.wire
+      %c = arith.constant 42 : i32
+      %w2 = quake.x %w1 : (!quake.wire) -> !quake.wire
+      quake.sink %w2 : !quake.wire
+      return %c : i32
+    }
+    ```
+    becomes (operationally equivalent ordering):
+    ```mlir
+    func.func @kernel() -> i32 {
+      %c = arith.constant 42 : i32
+      %w = quake.null_wire
+      %w1 = quake.x %w : (!quake.wire) -> !quake.wire
+      %w2 = quake.x %w1 : (!quake.wire) -> !quake.wire
+      quake.sink %w2 : !quake.wire
+      return %c : i32
+    }
+    ```
+  }];
+}
+
 // GlobalizeArrayValues must be a module pass because it may promoted array
 // constants from functions to global constants (changes their scope).
 def GlobalizeArrayValues : Pass<"globalize-array-values", "mlir::ModuleOp"> {
@@ -1350,9 +1392,9 @@ def StackFramePrealloc : Pass<"stack-frame-prealloc", "mlir::func::FuncOp"> {
     based on their scopes, but works at a lower semantic level of the IR. This
     pass aims to optimize patterns such as
     ```mlir
-      %10 = call @llvm.stacksave.p0()
+      %10 = call @llvm.stacksave()
       %24 = cc.alloca !T
-      call @llvm.stackrestore.p0(%10)
+      call @llvm.stackrestore(%10)
     ```
     such that the allocation, %24, is moved to the entry block and the two
     stack guards, if they guard no allocations, can be correctly removed.

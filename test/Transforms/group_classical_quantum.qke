@@ -1,0 +1,223 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                      //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+//
+// Exercises `group-classical-and-quantum-ops`: classical-first scheduling
+// among ready ops pulls the same macro-shape as manually grouped QIR (prep
+// classical, then a quantum slice, then post-classical / next prep), without
+// inserting barrier ops or new blocks.
+
+// RUN: cudaq-opt --group-classical-and-quantum-ops %s | FileCheck %s
+
+func.func @reorder_it() -> i32 {
+  %0 = quake.null_wire
+  %1 = quake.x %0 : (!quake.wire) -> !quake.wire
+  %c = arith.constant 42 : i32
+  %2 = quake.x %1 : (!quake.wire) -> !quake.wire
+  quake.sink %2 : !quake.wire
+  return %c : i32
+}
+
+// CHECK-LABEL: func.func @reorder_it
+// CHECK-DAG:       %[[C:.*]] = arith.constant 42 : i32
+// CHECK-DAG:       %[[W:.*]] = quake.null_wire
+// CHECK:           quake.x %[[W]]
+// CHECK:           quake.x
+// CHECK:           quake.sink
+// CHECK:           return %[[C]]
+
+// Classical prep (three angles) should appear as one region before any wire
+// work, then the Rx chain runs as one quantum region (cf. a `load` block then
+// a `quantum` block in grouped QIR).
+
+func.func @interleaved_regions() -> f64 {
+  %w0 = quake.null_wire
+  %c1 = arith.constant 0.1 : f64
+  %c2 = arith.constant 0.2 : f64
+  %c3 = arith.constant 0.3 : f64
+  %w1 = quake.rx (%c1) %w0 : (f64, !quake.wire) -> !quake.wire
+  %w2 = quake.rx (%c2) %w1 : (f64, !quake.wire) -> !quake.wire
+  %w3 = quake.rx (%c3) %w2 : (f64, !quake.wire) -> !quake.wire
+  quake.sink %w3 : !quake.wire
+  return %c3 : f64
+}
+
+// CHECK-LABEL: func.func @interleaved_regions
+// CHECK-COUNT-3:   arith.constant
+// CHECK-NEXT:      quake.null_wire
+// CHECK-COUNT-3:   quake.rx
+// CHECK-NEXT:      quake.sink
+// CHECK-NEXT:      return
+
+// `arith.extui` depends on the measurement bit, so it stays in a classical
+// region *after* the contiguous Quake slice (gates + mz + discriminate), like
+// `readout` / `post-classical` sections in grouped QIR.
+
+func.func @measure_then_classical() -> i32 {
+  %prep = arith.constant 0.0 : f64
+  %w0 = quake.null_wire
+  %w1 = quake.rx (%prep) %w0 : (f64, !quake.wire) -> !quake.wire
+  %m:2 = quake.mz %w1 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %d = quake.discriminate %m#0 : (!quake.measure) -> i1
+  %i = arith.extui %d : i1 to i32
+  quake.sink %m#1 : !quake.wire
+  return %i : i32
+}
+
+// CHECK-LABEL: func.func @measure_then_classical
+// CHECK:           arith.constant
+// CHECK-NEXT:      quake.null_wire
+// CHECK-NEXT:      quake.rx
+// CHECK-NEXT:      quake.mz
+// CHECK-NEXT:      quake.discriminate
+// CHECK-NEXT:      arith.extui
+// CHECK-NEXT:      quake.sink
+// CHECK-NEXT:      return
+
+// Second rotation angle is computed from the first measurement (`sitofp`
+// after `extui`), so we get **post-classical** work, then another **quantum**
+// slice—similar in spirit to `post-classical` → `load4` → `quantum2` in the
+// grouped QIR example.
+
+func.func @two_rounds_flat() -> f64 {
+  %prep1 = arith.constant 0.1 : f64
+  %w0 = quake.null_wire
+  %w2 = quake.null_wire
+  %w1 = quake.rx (%prep1) %w0 : (f64, !quake.wire) -> !quake.wire
+  %m:2 = quake.mz %w1 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %d = quake.discriminate %m#0 : (!quake.measure) -> i1
+  %i = arith.extui %d : i1 to i32
+  %angle2 = arith.sitofp %i : i32 to f64
+  %w3 = quake.rx (%angle2) %w2 : (f64, !quake.wire) -> !quake.wire
+  quake.sink %m#1 : !quake.wire
+  quake.sink %w3 : !quake.wire
+  return %angle2 : f64
+}
+
+// CHECK-LABEL: func.func @two_rounds_flat
+// CHECK:           arith.constant
+// CHECK-NEXT:      quake.null_wire
+// CHECK-NEXT:      quake.null_wire
+// CHECK-NEXT:      quake.rx
+// CHECK-NEXT:      quake.mz
+// CHECK-NEXT:      quake.discriminate
+// CHECK-NEXT:      arith.extui
+// CHECK-NEXT:      arith.sitofp
+// CHECK-NEXT:      quake.rx
+// CHECK-NEXT:      quake.sink
+// CHECK-NEXT:      quake.sink
+// CHECK-NEXT:      return
+
+// Stress test: five measurement rounds on one wire, with bias constants and
+// unrelated integer junk declared *before* the first `quake.rx` and the
+// integer reduction originally placed *after* the last `quake.mz`. The
+// source is deliberately unreadable (constants and junk split across the
+// quantum sequence). After `group-classical-and-quantum-ops` you should see a
+// large classical precursor (all independent `arith` hoisted), then a repeating
+// ``Q -> C -> Q -> C -> …`` cadence: each ``Q`` is ``rx; mz; discriminate``,
+// each ``C`` (after the first measurement) is ``extui; sitofp; addf`` feeding
+// the next angle—similar in spirit to ``C1 -> Q1 -> C2 -> Q2 -> …``.
+
+func.func @stress_cascade_five() -> f64 {
+  %bias5 = arith.constant 5.000000e-02 : f64
+  %bias4 = arith.constant 4.000000e-02 : f64
+  %bias3 = arith.constant 3.000000e-02 : f64
+  %bias2 = arith.constant 2.000000e-02 : f64
+  %junk_d = arith.constant 11 : i32
+  %junk_c = arith.constant 13 : i32
+  %junk_b = arith.constant 17 : i32
+  %junk_a = arith.constant 19 : i32
+  %n0 = quake.null_wire
+  %a0 = arith.constant 1.000000e-01 : f64
+  %w0 = quake.rx (%a0) %n0 : (f64, !quake.wire) -> !quake.wire
+  %m0:2 = quake.mz %w0 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %d0 = quake.discriminate %m0#0 : (!quake.measure) -> i1
+  %i0 = arith.extui %d0 : i1 to i32
+  %s0 = arith.sitofp %i0 : i32 to f64
+  %t0 = arith.addf %s0, %bias2 : f64
+  %w1 = quake.rx (%t0) %m0#1 : (f64, !quake.wire) -> !quake.wire
+  %m1:2 = quake.mz %w1 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %d1 = quake.discriminate %m1#0 : (!quake.measure) -> i1
+  %i1 = arith.extui %d1 : i1 to i32
+  %s1 = arith.sitofp %i1 : i32 to f64
+  %t1 = arith.addf %s1, %bias3 : f64
+  %w2 = quake.rx (%t1) %m1#1 : (f64, !quake.wire) -> !quake.wire
+  %m2:2 = quake.mz %w2 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %d2 = quake.discriminate %m2#0 : (!quake.measure) -> i1
+  %i2 = arith.extui %d2 : i1 to i32
+  %s2 = arith.sitofp %i2 : i32 to f64
+  %t2 = arith.addf %s2, %bias4 : f64
+  %w3 = quake.rx (%t2) %m2#1 : (f64, !quake.wire) -> !quake.wire
+  %m3:2 = quake.mz %w3 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %d3 = quake.discriminate %m3#0 : (!quake.measure) -> i1
+  %i3 = arith.extui %d3 : i1 to i32
+  %s3 = arith.sitofp %i3 : i32 to f64
+  %t3 = arith.addf %s3, %bias5 : f64
+  %w4 = quake.rx (%t3) %m3#1 : (f64, !quake.wire) -> !quake.wire
+  %m4:2 = quake.mz %w4 : (!quake.wire) -> (!quake.measure, !quake.wire)
+  %d4 = quake.discriminate %m4#0 : (!quake.measure) -> i1
+  %i4 = arith.extui %d4 : i1 to i32
+  %s4 = arith.sitofp %i4 : i32 to f64
+  %acc0 = arith.addi %junk_a, %junk_b : i32
+  %acc1 = arith.addi %acc0, %junk_c : i32
+  %acc2 = arith.addi %acc1, %junk_d : i32
+  %accf = arith.sitofp %acc2 : i32 to f64
+  %out = arith.addf %s4, %accf : f64
+  quake.sink %m4#1 : !quake.wire
+  return %out : f64
+}
+
+// CHECK-LABEL: func.func @stress_cascade_five
+// C1: every independent constant, then the junk reduction (moved from EOF).
+// CHECK-COUNT-9:   arith.constant
+// CHECK-NEXT:      arith.addi
+// CHECK-NEXT:      arith.addi
+// CHECK-NEXT:      arith.addi
+// CHECK-NEXT:      arith.sitofp
+// Q1
+// CHECK-NEXT:      quake.null_wire
+// CHECK-NEXT:      quake.rx
+// CHECK-NEXT:      quake.mz
+// CHECK-NEXT:      quake.discriminate
+// C2
+// CHECK-NEXT:      arith.extui
+// CHECK-NEXT:      arith.sitofp
+// CHECK-NEXT:      arith.addf
+// Q2
+// CHECK-NEXT:      quake.rx
+// CHECK-NEXT:      quake.mz
+// CHECK-NEXT:      quake.discriminate
+// C3
+// CHECK-NEXT:      arith.extui
+// CHECK-NEXT:      arith.sitofp
+// CHECK-NEXT:      arith.addf
+// Q3
+// CHECK-NEXT:      quake.rx
+// CHECK-NEXT:      quake.mz
+// CHECK-NEXT:      quake.discriminate
+// C4
+// CHECK-NEXT:      arith.extui
+// CHECK-NEXT:      arith.sitofp
+// CHECK-NEXT:      arith.addf
+// Q4
+// CHECK-NEXT:      quake.rx
+// CHECK-NEXT:      quake.mz
+// CHECK-NEXT:      quake.discriminate
+// C5
+// CHECK-NEXT:      arith.extui
+// CHECK-NEXT:      arith.sitofp
+// CHECK-NEXT:      arith.addf
+// Q5
+// CHECK-NEXT:      quake.rx
+// CHECK-NEXT:      quake.mz
+// CHECK-NEXT:      quake.discriminate
+// C6 (tail classical before sink)
+// CHECK-NEXT:      arith.extui
+// CHECK-NEXT:      arith.sitofp
+// CHECK-NEXT:      arith.addf
+// CHECK-NEXT:      quake.sink
+// CHECK-NEXT:      return
