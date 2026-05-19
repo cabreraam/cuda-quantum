@@ -695,6 +695,13 @@ def GlobalizeArrayValues : Pass<"globalize-array-values", "mlir::ModuleOp"> {
   }];
 }
 
+def GroupUnitariesAndMsmtsAnalysis : Pass<"group-unitaries-and-msmts-analysis", "mlir::func::FuncOp"> {
+  let summary = "Group unitary and measurement operations logically.";
+  let description = [{
+    This pass groups unitary and measurement operations logically.
+  }];
+}
+
 // LambdaLifting is a module pass because it may modify the ModuleOp and add
 // new FuncOps.
 def LambdaLifting : Pass<"lambda-lifting", "mlir::ModuleOp"> {
