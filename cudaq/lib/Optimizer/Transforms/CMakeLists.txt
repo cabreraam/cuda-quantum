@@ -42,6 +42,7 @@ add_cudaq_library(OptTransforms
   GetConcreteMatrix.cpp
   GlobalizeArrayValues.cpp
   GroupUnitariesAndMsmts.cpp
+  GroupUnitariesAndMsmtsSlices.cpp
   LambdaLifting.cpp
   LiftArrayAlloc.cpp
   LinearCtrlRelations.cpp
@@ -87,6 +88,7 @@ add_cudaq_library(OptTransforms
     
   LINK_LIBS PUBLIC
     CCDialect
+    OptAnalysis
     MLIRIR
     OptimBuilder
     QECDialect

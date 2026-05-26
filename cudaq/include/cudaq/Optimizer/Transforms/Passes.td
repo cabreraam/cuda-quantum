@@ -696,9 +696,21 @@ def GlobalizeArrayValues : Pass<"globalize-array-values", "mlir::ModuleOp"> {
 }
 
 def GroupUnitariesAndMsmtsAnalysis : Pass<"group-unitaries-and-msmts-analysis", "mlir::func::FuncOp"> {
-  let summary = "Group unitary and measurement operations logically.";
+  let summary = "Classify unitary and measurement operations.";
   let description = [{
-    This pass groups unitary and measurement operations logically.
+    This analysis classifies unitary and measurement operations in a function.
+    It also records simple control-dependency values for operations nested
+    under `cc.if` regions. It does not build program slices.
+  }];
+}
+
+def GroupUnitariesAndMsmtsSlices : Pass<"group-unitaries-and-msmts-slices", "mlir::func::FuncOp"> {
+  let summary = "Build measurement-centered quantum program slices.";
+  let description = [{
+    This pass consumes the unitary/measurement analysis and builds a backward
+    program slice for each measurement. The slices follow SSA dependencies,
+    ref-style quantum state dependencies, and simple `cc.if` control
+    dependencies without enumerating Boolean paths.
   }];
 }
 

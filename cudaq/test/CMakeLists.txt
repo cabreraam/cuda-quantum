@@ -20,6 +20,7 @@ if (CUDAQ_DISABLE_RUNTIME)
   set(CUDAQ_EXTRA_CONFIG_EXCLUDES "NVQPP")
 endif()
 
+add_subdirectory(lib)
 add_subdirectory(plugin)
 
 configure_lit_site_cfg(

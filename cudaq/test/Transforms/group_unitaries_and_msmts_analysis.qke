@@ -1,0 +1,40 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                       //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// RUN: cudaq-opt --mlir-disable-threading --test-unitary-measurement-analysis %s 2>&1 | FileCheck %s
+
+func.func @classifier() {
+  %q0 = quake.alloca !quake.ref
+  %q1 = quake.alloca !quake.ref
+  quake.h %q0 : (!quake.ref) -> ()
+  quake.reset %q0 : (!quake.ref) -> ()
+  %m0 = quake.mz %q0 : (!quake.ref) -> !quake.measure
+  %bit = quake.discriminate %m0 : (!quake.measure) -> i1
+  cc.if(%bit) {
+    quake.x %q1 : (!quake.ref) -> ()
+  } else {
+    quake.h %q1 : (!quake.ref) -> ()
+  }
+  %m1 = quake.mx %q1 : (!quake.ref) -> !quake.measure
+  return
+}
+
+// CHECK-LABEL: Unitary/measurement analysis for: classifier
+// CHECK:       Unitary op: quake.h {{.*}} : (!quake.ref) -> ()
+// CHECK-NOT:   Unitary op: quake.reset
+// CHECK:       Unitary op: quake.x {{.*}} : (!quake.ref) -> ()
+// CHECK:       Unitary op: quake.h {{.*}} : (!quake.ref) -> ()
+// CHECK:       Measurement op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+// CHECK:       Measurement op: {{.*}} = quake.mx {{.*}} : (!quake.ref) -> !quake.measure
+// CHECK:       Control dependency map:
+// CHECK:       Controlled op: quake.x {{.*}} : (!quake.ref) -> ()
+// CHECK-NEXT:    Control dependencies:
+// CHECK-NEXT:      {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK:       Controlled op: quake.h {{.*}} : (!quake.ref) -> ()
+// CHECK-NEXT:    Control dependencies:
+// CHECK-NEXT:      {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1

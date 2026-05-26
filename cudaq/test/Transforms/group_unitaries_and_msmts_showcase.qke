@@ -1,0 +1,79 @@
+// REQUIRES: asserts
+// RUN: cudaq-opt --mlir-disable-threading --group-unitaries-and-msmts-slices --debug-only=group-unitaries-and-msmts-slices %s 2>&1 | FileCheck %s
+
+func.func @grouping_showcase(%external_theta: f64) -> i1 attributes {"cudaq-kernel"} {
+  // Main register.
+  %q0 = quake.alloca !quake.ref
+  %q1 = quake.alloca !quake.ref
+  %q2 = quake.alloca !quake.ref
+  %q3 = quake.alloca !quake.ref
+
+  // Completely independent ancilla-like qubit. Its preparation should only
+  // appear in the slice for %m3, not in the slices for %m1 or %m2.
+  %q4 = quake.alloca !quake.ref
+
+  // Classical parameter chain. These arith ops matter for the measurements
+  // that depend on rotations using %theta and %phi.
+  %c0 = arith.constant 0.125 : f64
+  %c1 = arith.constant 2.000000e+00 : f64
+  %theta = arith.addf %external_theta, %c0 : f64
+  %phi = arith.mulf %theta, %c1 : f64
+
+  // This gate is intentionally before a reset. It should not be blamed for the
+  // later measurement on %q0 because the reset overwrites the earlier state.
+  quake.h %q0 : (!quake.ref) -> ()
+  quake.reset %q0 : (!quake.ref) -> ()
+
+  // A real dependency cone for %m1: %q0, %q1, and %q2 become correlated.
+  quake.x %q0 : (!quake.ref) -> ()
+  quake.ry (%theta) %q1 : (f64, !quake.ref) -> ()
+  quake.h %q2 : (!quake.ref) -> ()
+  quake.x [%q0] %q1 : (!quake.ref, !quake.ref) -> ()
+  quake.x [%q1] %q2 : (!quake.ref, !quake.ref) -> ()
+  quake.rz (%phi) %q2 : (f64, !quake.ref) -> ()
+  %m1 = quake.mz %q2 : (!quake.ref) -> !quake.measure
+
+  // Mid-circuit feedback: %m1 is a classical dependency of this branch, so a
+  // later measurement of %q3 should include %m1 and the work that produced it.
+  %b1 = quake.discriminate %m1 : (!quake.measure) -> i1
+  cc.if(%b1) {
+    quake.x %q3 : (!quake.ref) -> ()
+  } else {
+    quake.h %q3 : (!quake.ref) -> ()
+  }
+  quake.x [%q2] %q3 : (!quake.ref, !quake.ref) -> ()
+  %m2 = quake.mz %q3 : (!quake.ref) -> !quake.measure
+
+  // Independent qubit: this slice should stay tiny and should not pull in the
+  // entangling work above.
+  quake.x %q4 : (!quake.ref) -> ()
+  %m3 = quake.mz %q4 : (!quake.ref) -> !quake.measure
+
+  // Make one result live so the function is a little closer to real IR.
+  %out = quake.discriminate %m2 : (!quake.measure) -> i1
+  return %out : i1
+}
+
+// CHECK-LABEL: Program slices for: grouping_showcase
+// CHECK-LABEL: Measurement-centered slice 0:
+// CHECK-NOT:   Slice op: quake.h
+// CHECK:       Slice op: quake.reset
+// CHECK:       Slice op: quake.x
+// CHECK:       Slice op: quake.ry
+// CHECK:       Slice op: quake.h
+// CHECK:       Slice op: quake.x [{{.*}}] {{.*}} : (!quake.ref, !quake.ref) -> ()
+// CHECK:       Slice op: quake.x [{{.*}}] {{.*}} : (!quake.ref, !quake.ref) -> ()
+// CHECK:       Slice op: quake.rz
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+// CHECK-LABEL: Measurement-centered slice 1:
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+// CHECK:       Slice op: quake.x {{.*}} : (!quake.ref) -> ()
+// CHECK:       Slice op: quake.h {{.*}} : (!quake.ref) -> ()
+// CHECK:       Slice op: quake.x [{{.*}}] {{.*}} : (!quake.ref, !quake.ref) -> ()
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+// CHECK-LABEL: Measurement-centered slice 2:
+// CHECK-NOT:   Slice op: arith
+// CHECK-NOT:   Slice op: quake.rz
+// CHECK:       Slice op: {{.*}} = quake.alloca !quake.ref
+// CHECK:       Slice op: quake.x {{.*}} : (!quake.ref) -> ()
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure

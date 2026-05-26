@@ -1,0 +1,160 @@
+// ========================================================================== //
+// Copyright (c) 2026 NVIDIA Corporation & Affiliates.                       //
+// All rights reserved.                                                       //
+//                                                                            //
+// This source code and the accompanying materials are made available under   //
+// the terms of the Apache License 2.0 which accompanies this distribution.   //
+// ========================================================================== //
+
+// REQUIRES: asserts
+// RUN: cudaq-opt --mlir-disable-threading --group-unitaries-and-msmts-slices --debug-only=group-unitaries-and-msmts-slices %s 2>&1 | FileCheck %s
+
+func.func @independent_measurements() {
+  %q0 = quake.alloca !quake.ref
+  %q1 = quake.alloca !quake.ref
+  quake.h %q0 : (!quake.ref) -> ()
+  quake.x %q1 : (!quake.ref) -> ()
+  %m0 = quake.mz %q1 : (!quake.ref) -> !quake.measure
+  %m1 = quake.mz %q0 : (!quake.ref) -> !quake.measure
+  return
+}
+
+// CHECK-LABEL: Program slices for: independent_measurements
+// CHECK-LABEL: Measurement-centered slice 0:
+// CHECK:       Slice op: {{.*}} = quake.alloca !quake.ref
+// CHECK-NOT:   Slice op: quake.h
+// CHECK:       Slice op: quake.x
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+// CHECK-LABEL: Measurement-centered slice 1:
+// CHECK:       Slice op: {{.*}} = quake.alloca !quake.ref
+// CHECK:       Slice op: quake.h
+// CHECK-NOT:   Slice op: quake.x
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+
+func.func @entangled_measurement() {
+  %q0 = quake.alloca !quake.ref
+  %q1 = quake.alloca !quake.ref
+  quake.h %q0 : (!quake.ref) -> ()
+  quake.x %q1 : (!quake.ref) -> ()
+  quake.x [%q0] %q1 : (!quake.ref, !quake.ref) -> ()
+  %m0 = quake.mz %q1 : (!quake.ref) -> !quake.measure
+  return
+}
+
+// CHECK-LABEL: Program slices for: entangled_measurement
+// CHECK-LABEL: Measurement-centered slice 0:
+// CHECK:       Slice op: {{.*}} = quake.alloca !quake.ref
+// CHECK:       Slice op: {{.*}} = quake.alloca !quake.ref
+// CHECK:       Slice op: quake.h
+// CHECK:       Slice op: quake.x {{.*}} : (!quake.ref) -> ()
+// CHECK:       Slice op: quake.x [{{.*}}] {{.*}} : (!quake.ref, !quake.ref) -> ()
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+
+
+func.func @parameter_dependency() {
+  %q0 = quake.alloca !quake.ref
+  %lhs = arith.constant 1.0 : f64
+  %rhs = arith.constant 2.0 : f64
+  %theta = arith.addf %lhs, %rhs : f64
+  quake.rz (%theta) %q0 : (f64, !quake.ref) -> ()
+  %m0 = quake.mz %q0 : (!quake.ref) -> !quake.measure
+  return
+}
+
+// CHECK-LABEL: Program slices for: parameter_dependency
+// CHECK-LABEL: Measurement-centered slice 0:
+// CHECK:       Slice op: {{.*}} = quake.alloca !quake.ref
+// CHECK:       Slice op: {{.*}} = arith.constant {{.*}} : f64
+// CHECK:       Slice op: {{.*}} = arith.constant {{.*}} : f64
+// CHECK:       Slice op: {{.*}} = arith.addf {{.*}} : f64
+// CHECK:       Slice op: quake.rz ({{.*}}) {{.*}} : (f64, !quake.ref) -> ()
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+
+func.func @reset_boundary() {
+  %q0 = quake.alloca !quake.ref
+  quake.h %q0 : (!quake.ref) -> ()
+  quake.reset %q0 : (!quake.ref) -> ()
+  quake.x %q0 : (!quake.ref) -> ()
+  %m0 = quake.mz %q0 : (!quake.ref) -> !quake.measure
+  return
+}
+
+// CHECK-LABEL: Program slices for: reset_boundary
+// CHECK-LABEL: Measurement-centered slice 0:
+// CHECK-NOT:   Slice op: quake.h
+// CHECK:       Slice op: quake.reset
+// CHECK:       Slice op: quake.x
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+
+
+func.func @classical_control_dependency() {
+  %q0 = quake.alloca !quake.ref
+  %q1 = quake.alloca !quake.ref
+  %m0 = quake.mz %q0 : (!quake.ref) -> !quake.measure
+  %bit = quake.discriminate %m0 : (!quake.measure) -> i1
+  cc.if(%bit) {
+    quake.x %q1 : (!quake.ref) -> ()
+  } else {
+    quake.h %q1 : (!quake.ref) -> ()
+  }
+  %m1 = quake.mz %q1 : (!quake.ref) -> !quake.measure
+  return
+}
+
+// CHECK-LABEL: Program slices for: classical_control_dependency
+// CHECK-LABEL: Measurement-centered slice 1:
+// CHECK:       Control dependency values:
+// CHECK-NEXT:  {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+// CHECK:       Slice op: {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK:       Slice op: quake.x {{.*}} : (!quake.ref) -> ()
+// CHECK-NEXT:  {{.*}}Control dependencies:
+// CHECK-NEXT:  {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK:       Slice op: quake.h {{.*}} : (!quake.ref) -> ()
+// CHECK-NEXT:  {{.*}}Control dependencies:
+// CHECK-NEXT:  {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+
+func.func @nested_control_dependency() {
+  %q0 = quake.alloca !quake.ref
+  %q1 = quake.alloca !quake.ref
+  %q2 = quake.alloca !quake.ref
+  %m0 = quake.mz %q0 : (!quake.ref) -> !quake.measure
+  %outer = quake.discriminate %m0 : (!quake.measure) -> i1
+  %m1 = quake.mz %q1 : (!quake.ref) -> !quake.measure
+  %inner = quake.discriminate %m1 : (!quake.measure) -> i1
+  cc.if(%outer) {
+    cc.if(%inner) {
+      quake.x %q2 : (!quake.ref) -> ()
+    } else {
+      quake.h %q2 : (!quake.ref) -> ()
+    }
+  } else {
+    quake.x %q2 : (!quake.ref) -> ()
+  }
+  %m2 = quake.mz %q2 : (!quake.ref) -> !quake.measure
+  return
+}
+
+// CHECK-LABEL: Program slices for: nested_control_dependency
+// CHECK-LABEL: Measurement-centered slice 2:
+// CHECK:       Control dependency values:
+// CHECK-NEXT:  {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK-NEXT:  {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+// CHECK:       Slice op: {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK:       Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+// CHECK:       Slice op: {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK:       Slice op: quake.x {{.*}} : (!quake.ref) -> ()
+// CHECK-NEXT:  {{.*}}Control dependencies:
+// CHECK-NEXT:  {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK-NEXT:  {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK:       Slice op: quake.h {{.*}} : (!quake.ref) -> ()
+// CHECK-NEXT:  {{.*}}Control dependencies:
+// CHECK-NEXT:  {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK-NEXT:  {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK:       Slice op: quake.x {{.*}} : (!quake.ref) -> ()
+// CHECK-NEXT:  {{.*}}Control dependencies:
+// CHECK-NEXT:  {{.*}} = quake.discriminate {{.*}} : (!quake.measure) -> i1
+// CHECK-NEXT:  {{.*}}Slice op: {{.*}} = quake.mz {{.*}} : (!quake.ref) -> !quake.measure
+

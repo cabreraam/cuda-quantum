@@ -31,6 +31,12 @@
 
 using namespace llvm;
 
+namespace cudaq::test {
+#ifdef CUDAQ_INCLUDE_TESTS
+void registerTestUnitaryMeasurementAnalysisPass();
+#endif
+} // namespace cudaq::test
+
 /// Dialect extension to allow inlining of the MLIR defined LLVM-IR dialects
 /// which lacks inlining support out of the box.
 class InlinerExtension
@@ -59,6 +65,9 @@ int main(int argc, char **argv) {
 
   cudaq::registerAllCLOptions();
   cudaq::registerAllPasses();
+#ifdef CUDAQ_INCLUDE_TESTS
+  cudaq::test::registerTestUnitaryMeasurementAnalysisPass();
+#endif
 
   // See if we have been asked to load a pass plugin,
   // if so load it.
