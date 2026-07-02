@@ -53,6 +53,14 @@ static void expectGroupOps(const UnitaryOpGroup &group,
     EXPECT_EQ(group.ops[index++], op);
 }
 
+static void expectValues(ArrayRef<Value> actual,
+                         std::initializer_list<Value> expected) {
+  ASSERT_EQ(actual.size(), expected.size());
+  std::size_t index = 0;
+  for (Value value : expected)
+    EXPECT_EQ(actual[index++], value);
+}
+
 class BuilderUnitaryOpGroupingAnalysisTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -217,6 +225,155 @@ TEST_F(BuilderUnitaryOpGroupingAnalysisTest, EmptyFunctionHasNoGroups) {
 
   UnitaryOpGroupingAnalysis analysis(func);
   EXPECT_TRUE(analysis.getGroups().empty());
+}
+
+// Expected MLIR:
+//
+//   func.func @value_measurement_boundary() attributes {"cudaq-kernel"} {
+//     %q0 = quake.null_wire
+//     %q1 = quake.null_wire
+//     %x = quake.x %q0 : (!quake.wire) -> !quake.wire
+//     %m, %q0_after = quake.mz %x : (!quake.wire) ->
+//         (!cc.measure_handle, !quake.wire)
+//     %h = quake.h %q1 : (!quake.wire) -> !quake.wire
+//     quake.sink %q0_after : !quake.wire
+//     quake.sink %h : !quake.wire
+//     return
+//   }
+//
+// Expected analysis:
+//   groups.size() == 1
+//   group 0: quake.x, quake.h
+//   readout 0: mz consumes x and produces q0_after
+TEST_F(BuilderUnitaryOpGroupingAnalysisTest,
+       ValueSemanticsGroupsAcrossIndependentMeasurement) {
+  OpBuilder builder(&context);
+  Location loc = builder.getUnknownLoc();
+  auto wireTy = cudaq::quake::WireType::get(&context);
+  auto measureTy = cudaq::cc::MeasureHandleType::get(&context);
+  auto func = createKernel("value_measurement_boundary");
+  builder.setInsertionPointToEnd(&func.front());
+
+  Value q0 = cudaq::quake::NullWireOp::create(builder, loc, wireTy).getResult();
+  Value q1 = cudaq::quake::NullWireOp::create(builder, loc, wireTy).getResult();
+  auto x = cudaq::quake::XOp::create(builder, loc, TypeRange{wireTy},
+                                     UnitAttr{}, ValueRange{}, ValueRange{},
+                                     ValueRange{q0}, DenseBoolArrayAttr{});
+  auto mz =
+      cudaq::quake::MzOp::create(builder, loc, TypeRange{measureTy, wireTy},
+                                 ValueRange{x.getWires()[0]}, StringAttr{});
+  auto h = cudaq::quake::HOp::create(builder, loc, TypeRange{wireTy},
+                                     UnitAttr{}, ValueRange{}, ValueRange{},
+                                     ValueRange{q1}, DenseBoolArrayAttr{});
+  cudaq::quake::SinkOp::create(builder, loc, TypeRange{}, mz.getWires()[0]);
+  cudaq::quake::SinkOp::create(builder, loc, TypeRange{}, h.getWires()[0]);
+  func::ReturnOp::create(builder, loc);
+
+  UnitaryOpGroupingAnalysis analysis(func);
+  const auto &groups = analysis.getGroups();
+
+  ASSERT_EQ(groups.size(), 1u);
+  const UnitaryOpGroup &group = groups[0];
+  expectGroupOps(group, {x.getOperation(), h.getOperation()});
+  expectValues(group.quantumInputs, {q0, q1});
+  expectValues(group.quantumOutputs, {x.getWires()[0], h.getWires()[0]});
+  ASSERT_EQ(group.readouts.size(), 1u);
+  auto readout = group.readouts[0];
+  EXPECT_EQ(readout.measurement.getOperation(), mz.getOperation());
+  expectValues(readout.measuredWires, {x.getWires()[0]});
+  expectValues(readout.postMeasurementWires, {mz.getWires()[0]});
+  EXPECT_TRUE(analysis.inSameGroup(x.getOperation(), h.getOperation()));
+  EXPECT_EQ(analysis.getGroupProducingValue(x.getWires()[0]), &group);
+}
+
+// Expected analysis:
+//   group 0: quake.x, quake.h
+//   group 1: quake.z
+//   quake.z is not grouped with quake.x because it consumes the
+//   post-measurement wire produced by quake.mz.
+TEST_F(BuilderUnitaryOpGroupingAnalysisTest,
+       ValueSemanticsPostMeasurementWireStartsLaterGroup) {
+  OpBuilder builder(&context);
+  Location loc = builder.getUnknownLoc();
+  auto wireTy = cudaq::quake::WireType::get(&context);
+  auto measureTy = cudaq::cc::MeasureHandleType::get(&context);
+  auto func = createKernel("value_post_measurement_group");
+  builder.setInsertionPointToEnd(&func.front());
+
+  Value q0 = cudaq::quake::NullWireOp::create(builder, loc, wireTy).getResult();
+  Value q1 = cudaq::quake::NullWireOp::create(builder, loc, wireTy).getResult();
+  auto x = cudaq::quake::XOp::create(builder, loc, TypeRange{wireTy},
+                                     UnitAttr{}, ValueRange{}, ValueRange{},
+                                     ValueRange{q0}, DenseBoolArrayAttr{});
+  auto mz =
+      cudaq::quake::MzOp::create(builder, loc, TypeRange{measureTy, wireTy},
+                                 ValueRange{x.getWires()[0]}, StringAttr{});
+  auto h = cudaq::quake::HOp::create(builder, loc, TypeRange{wireTy},
+                                     UnitAttr{}, ValueRange{}, ValueRange{},
+                                     ValueRange{q1}, DenseBoolArrayAttr{});
+  auto z = cudaq::quake::ZOp::create(
+      builder, loc, TypeRange{wireTy}, UnitAttr{}, ValueRange{}, ValueRange{},
+      ValueRange{mz.getWires()[0]}, DenseBoolArrayAttr{});
+  cudaq::quake::SinkOp::create(builder, loc, TypeRange{}, z.getWires()[0]);
+  cudaq::quake::SinkOp::create(builder, loc, TypeRange{}, h.getWires()[0]);
+  func::ReturnOp::create(builder, loc);
+
+  UnitaryOpGroupingAnalysis analysis(func);
+  const auto &groups = analysis.getGroups();
+
+  ASSERT_EQ(groups.size(), 2u);
+  expectGroupOps(groups[0], {x.getOperation(), h.getOperation()});
+  expectGroupOps(groups[1], {z.getOperation()});
+  EXPECT_TRUE(analysis.inSameGroup(x.getOperation(), h.getOperation()));
+  EXPECT_FALSE(analysis.inSameGroup(x.getOperation(), z.getOperation()));
+  ASSERT_EQ(groups[0].readouts.size(), 1u);
+  auto readout = groups[0].readouts[0];
+  EXPECT_EQ(readout.measurement.getOperation(), mz.getOperation());
+  expectValues(groups[1].quantumInputs, {mz.getWires()[0]});
+}
+
+// Expected analysis:
+//   group 0: quake.x, quake.h
+//   readout 0: one mz op consuming both group outputs and producing one
+//              post-measurement wire for each measured wire.
+TEST_F(BuilderUnitaryOpGroupingAnalysisTest,
+       ValueSemanticsMultiWireMeasurementRecordsSingleBoundary) {
+  OpBuilder builder(&context);
+  Location loc = builder.getUnknownLoc();
+  auto wireTy = cudaq::quake::WireType::get(&context);
+  Type measureVecTy =
+      cudaq::cc::StdvecType::get(cudaq::cc::MeasureHandleType::get(&context));
+  auto func = createKernel("value_multi_wire_measurement");
+  builder.setInsertionPointToEnd(&func.front());
+
+  Value q0 = cudaq::quake::NullWireOp::create(builder, loc, wireTy).getResult();
+  Value q1 = cudaq::quake::NullWireOp::create(builder, loc, wireTy).getResult();
+  auto x = cudaq::quake::XOp::create(builder, loc, TypeRange{wireTy},
+                                     UnitAttr{}, ValueRange{}, ValueRange{},
+                                     ValueRange{q0}, DenseBoolArrayAttr{});
+  auto h = cudaq::quake::HOp::create(builder, loc, TypeRange{wireTy},
+                                     UnitAttr{}, ValueRange{}, ValueRange{},
+                                     ValueRange{q1}, DenseBoolArrayAttr{});
+  auto mz = cudaq::quake::MzOp::create(
+      builder, loc, TypeRange{measureVecTy, wireTy, wireTy},
+      ValueRange{x.getWires()[0], h.getWires()[0]}, StringAttr{});
+  cudaq::quake::SinkOp::create(builder, loc, TypeRange{}, mz.getWires()[0]);
+  cudaq::quake::SinkOp::create(builder, loc, TypeRange{}, mz.getWires()[1]);
+  func::ReturnOp::create(builder, loc);
+
+  UnitaryOpGroupingAnalysis analysis(func);
+  const auto &groups = analysis.getGroups();
+
+  ASSERT_EQ(groups.size(), 1u);
+  const UnitaryOpGroup &group = groups[0];
+  expectGroupOps(group, {x.getOperation(), h.getOperation()});
+  ASSERT_EQ(group.readouts.size(), 1u);
+  auto readout = group.readouts[0];
+  EXPECT_EQ(readout.measurement.getOperation(), mz.getOperation());
+  expectValues(readout.measuredWires, {x.getWires()[0], h.getWires()[0]});
+  expectValues(readout.postMeasurementWires,
+               {mz.getWires()[0], mz.getWires()[1]});
+  expectValues(group.quantumOutputs, {x.getWires()[0], h.getWires()[0]});
 }
 
 // Expected MLIR:
